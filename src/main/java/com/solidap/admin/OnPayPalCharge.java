@@ -12,14 +12,22 @@ import com.google.gson.JsonObject;
 import com.paypal.api.payments.*;
 import com.paypal.base.rest.APIContext;
 import com.paypal.base.rest.PayPalRESTException;
+import com.sendgrid.Method;
+import com.sendgrid.Request;
+import com.sendgrid.Response;
+import com.sendgrid.SendGrid;
+import com.sendgrid.helpers.mail.Mail;
+import com.sendgrid.helpers.mail.objects.Email;
+import com.sendgrid.helpers.mail.objects.Personalization;
 
 import java.io.BufferedWriter;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 
@@ -28,29 +36,31 @@ public class OnPayPalCharge implements HttpFunction {
     private static final Gson gson = new Gson();
     private static final Logger logger = Logger.getLogger(OnPayPalCharge.class.getName());
     private static final Firestore FIRESTORE = FirestoreOptions.getDefaultInstance().getService();
-    String clientId = "AQ7dB8TnwEsm-A0ffir8NyoLytl5DnHLcctHSIGLZl-6MrAmeStSF2KW4_u1DX8NXm4cm64S4gDH8xkb";
-    String clientSecret = "EHUe9I3N2Qix8y9zLd92FOTCzFMoQ7nYRrU19crYMERsbB6CsmDvcfftFOe26seDm-yKvnz6wIDAzIHq";
-    String clientPath ="/my-doo-7c70c/us-central1";
-    String clientRootPath ="https://doodemo.com";
-    String currency ="CAD";
-    String mode = "sandbox";
 
     @Override
     public void service(HttpRequest request, HttpResponse response)
             throws IOException {
+        Properties prop = new Properties();
 
-        if (request.getPath().equals(clientPath + "/paypal/pay")) {
-            pay(request,response);
+        try (InputStream input = new FileInputStream("src/main/resources/application.properties")) {
+            prop.load(input);
+        } catch (IOException ex) {
+            logger.info("ERROR in file(): " + ex.getMessage());
+
+        }
+
+        if (request.getPath().equals(prop.getProperty("clientPath") + "/paypal/pay")) {
+            pay(request,response,prop);
             return;
         }
 
-        if (request.getPath().equals(clientPath + "/paypal/process")) {
-            process(request,response);
+        if (request.getPath().equals(prop.getProperty("clientPath") + "/paypal/process")) {
+            process(request,response,prop);
             return;
         }
     }
 
-    public void pay(HttpRequest request, HttpResponse response) throws IOException {
+    public void pay(HttpRequest request, HttpResponse response, Properties prop) throws IOException {
         JsonObject responseObject = new JsonObject();
         setCORS(request,response);
 
@@ -59,7 +69,7 @@ public class OnPayPalCharge implements HttpFunction {
 
         if (requestParsed != null) {
             Amount amount = new Amount();
-            amount.setCurrency(currency);
+            amount.setCurrency(prop.getProperty("currency"));
             amount.setTotal(requestParsed.getAsJsonObject().get("data").getAsJsonObject().get("cart").getAsJsonObject().get("total").getAsString());
 
             Transaction transaction = new Transaction();
@@ -83,11 +93,11 @@ public class OnPayPalCharge implements HttpFunction {
 
             RedirectUrls redirectUrls = new RedirectUrls();
             redirectUrls.setCancelUrl(request.getHeaders().get("Origin").get(0) + "/cart");
-            redirectUrls.setReturnUrl(clientRootPath + clientPath + "/paypal/process");
+            redirectUrls.setReturnUrl( prop.getProperty("clientRootPath") + prop.getProperty("clientPath")  + "/paypal/process");
             payment.setRedirectUrls(redirectUrls);
 
             try {
-                APIContext apiContext = new APIContext(clientId, clientSecret, mode);
+                APIContext apiContext = new APIContext(prop.getProperty("payPalClientId") , prop.getProperty("payPalClientSecret") , prop.getProperty("mode"));
                 Payment createdPayment = payment.create(apiContext);
                 for (Links link : createdPayment.getLinks()) {
                     if (link.getRel().equalsIgnoreCase("approval_url")) {
@@ -108,52 +118,81 @@ public class OnPayPalCharge implements HttpFunction {
 
     }
 
-    public void process(HttpRequest request, HttpResponse response) throws IOException {
+    public void process(HttpRequest request, HttpResponse response, Properties prop) throws IOException {
 
         Payment payment = new Payment();
-        String redirectURL = clientRootPath;
+        String redirectURL = prop.getProperty("clientRootPath");
         payment.setId(request.getQueryParameters().get("paymentId").get(0));
+        try {
+            APIContext apiContext = new APIContext(prop.getProperty("payPalClientId") , prop.getProperty("payPalClientSecret"),prop.getProperty("mode") );
+            PaymentExecution paymentExecution = new PaymentExecution();
+            paymentExecution.setPayerId(request.getQueryParameters().get("PayerID").get(0));
+            Payment createdPayment = payment.execute(apiContext,paymentExecution);
+
+            //Custom is the project root URL
+            redirectURL = createdPayment.getTransactions().get(0).getCustom() + "/cart";
+
+            DocumentReference order = FIRESTORE.collection("customers")
+                    .document("customers")
+                    .collection(createdPayment.getTransactions().get(0).getNoteToPayee()).document("orders")
+                    .collection("orders").document(createdPayment.getTransactions().get(0).getDescription());
+
             try {
-                APIContext apiContext = new APIContext(clientId, clientSecret, mode);
-                PaymentExecution paymentExecution = new PaymentExecution();
-                paymentExecution.setPayerId(request.getQueryParameters().get("PayerID").get(0));
-                Payment createdPayment = payment.execute(apiContext,paymentExecution);
+                order.update("status" , "paid");
+                Map<String, Object> rootObject = new HashMap<>();
+                Map<String, Object> paymentObject = new HashMap<>();
+                Map<String, Object> tokenObject = new HashMap<>();
+                tokenObject.put("created" , System.currentTimeMillis());
+                paymentObject.put("token" ,tokenObject);
+                rootObject.put("payment",paymentObject);
+                order.collection("paypal").add(rootObject);
 
-                redirectURL = createdPayment.getTransactions().get(0).getCustom() + "/cart";
-
-                /*JsonElement token = JsonParser.
-                        parseString(gson.toJson(FIRESTORE.document(affectedDoc).get().get().get("payment"))).getAsJsonObject().get("token");
-
-                JsonElement personalInfo = JsonParser.
-                        parseString(gson.toJson(FIRESTORE.document(affectedDoc).getParent().getParent().get().get().get("personalInfo")));
-
-                JsonElement cart = JsonParser.
-                        parseString(gson.toJson(FIRESTORE.document(affectedDoc).getParent().getParent().get().get().get("cart")));*/
-
-                DocumentReference order = FIRESTORE.collection("customers")
-                        .document("customers")
-                        .collection(createdPayment.getTransactions().get(0).getNoteToPayee()).document("orders")
-                        .collection("orders").document(createdPayment.getTransactions().get(0).getDescription());
-
-                try {
-                    order.update("status" , "paid");
-                    Map<String, Object> rootObject = new HashMap<>();
-                    Map<String, Object> paymentObject = new HashMap<>();
-                    Map<String, Object> tokenObject = new HashMap<>();
-                    tokenObject.put("created" , System.currentTimeMillis());
-                    paymentObject.put("token" ,tokenObject);
-                    rootObject.put("payment",paymentObject);
-                    order.collection("paypal").add(rootObject);
-                } catch (Exception ex) {
-                    logger.info("Exception while updating status(): " + ex.getMessage());
-                }
-                logger.info("STATUS: " + order.get().get().get("status"));
-            } catch (PayPalRESTException e) {
-                logger.info("PayPalRESTException(): " + e.getMessage());
             } catch (Exception ex) {
-                logger.info("Exception(): " + ex.getMessage());
+                logger.info("Exception while updating status(): " + ex.getMessage());
             }
-            setRedirect(redirectURL,response);
+            try{
+
+                Map <String ,Object > orderDetails = order.get().get().getData();
+                Map <String ,Object > personalInfo = (Map<String, Object>) orderDetails.get("personalInfo");
+                Map <String ,Object > address = (Map<String, Object>) orderDetails.get("address");
+                Map <String ,Object > cart = (Map<String, Object>) orderDetails.get("cart");
+
+                SendGrid sg = new SendGrid(prop.getProperty("sendGridKey"));
+                Email from = new Email(prop.getProperty("sendGridFrom"));
+                Email to = new Email(personalInfo.get("email").toString());
+                Mail mail = new Mail();
+                mail.setFrom(from);
+                Personalization dynamicData = new Personalization();
+                dynamicData.addTo(to);
+                dynamicData.addDynamicTemplateData("cartId" , createdPayment.getTransactions().get(0).getDescription());
+                dynamicData.addDynamicTemplateData("personalInfo" , personalInfo);
+                dynamicData.addDynamicTemplateData("address" , address);
+                dynamicData.addDynamicTemplateData("cart" , cart);
+                mail.addPersonalization(dynamicData);
+                mail.setTemplateId(prop.getProperty("sendGridConfirmationTemplateId"));
+                Request emailRequest = new Request();
+                try {
+                    emailRequest.setMethod(Method.POST);
+                    emailRequest.setEndpoint("mail/send");
+                    emailRequest.setBody(mail.build());
+                    Response emailResponse = sg.api(emailRequest);
+                    logger.info("emailResponse.getStatusCode() --------> " + emailResponse.getStatusCode());
+                    logger.info("emailResponse.getBody() --------> " + emailResponse.getBody());
+                    logger.info("emailResponse.getHeaders() --------> " + emailResponse.getHeaders());
+                } catch (IOException ex) {
+                    logger.info("EMAIL ERROR --------> " + ex.getMessage());
+                }
+            } catch (InterruptedException e) {
+                logger.log(Level.SEVERE,e.getMessage());
+            } catch (ExecutionException e) {
+                logger.log(Level.SEVERE,e.getMessage());
+            }
+        } catch (PayPalRESTException e) {
+            logger.info("PayPalRESTException(): " + e.getMessage());
+        } catch (Exception ex) {
+            logger.info("Exception(): " + ex.getMessage());
+        }
+        setRedirect(redirectURL,response);
     }
 
     public void setRedirect(String redirect,HttpResponse response) {
