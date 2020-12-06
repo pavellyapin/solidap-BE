@@ -18,7 +18,6 @@ import com.sendgrid.helpers.mail.objects.Email;
 import com.sendgrid.helpers.mail.objects.Personalization;
 import com.stripe.Stripe;
 import com.stripe.exception.StripeException;
-import com.stripe.model.Charge;
 import com.stripe.model.Customer;
 import com.stripe.model.PaymentIntent;
 import com.stripe.model.PaymentMethod;
@@ -34,9 +33,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-public class OnStripeCharge implements RawBackgroundFunction {
+public class OnTestStripeCharge implements RawBackgroundFunction {
 
-    private static final Logger logger = Logger.getLogger(OnStripeCharge.class.getName());
+    private static final Logger logger = Logger.getLogger(OnTestStripeCharge.class.getName());
     private static final Firestore FIRESTORE = FirestoreOptions.getDefaultInstance().getService();
 
     private static final Gson gson = new Gson();
@@ -53,7 +52,7 @@ public class OnStripeCharge implements RawBackgroundFunction {
 
         }
 
-        Stripe.apiKey = prop.getProperty("stripeApiKey");
+        Stripe.apiKey = prop.getProperty("stripeTestApiKey");
 
         String affectedDoc = context.resource().split("/documents/")[1].replace("\"", "");
         try {
@@ -116,30 +115,30 @@ public class OnStripeCharge implements RawBackgroundFunction {
 
     public void setPaidStatus(String affectedDoc,Map<String, Object> cart) {
         try{
-            long count = 0;
-            double ordersTotal = 0;
-            for (QueryDocumentSnapshot doc:FIRESTORE.document(affectedDoc).
-                    getParent().getParent().getParent().getParent().getParent().get().get()
-                    .getDocuments()) {
-                if (doc.getId().equals("orders")) {
-                    if (doc.get("orderCount") !=null) {
-                        count = (long) doc.get("orderCount");
-                    }
-                    if (doc.get("ordersTotal") !=null) {
-                        ordersTotal = (double) doc.get("ordersTotal");
+                long count = 0;
+                double ordersTotal = 0;
+                for (QueryDocumentSnapshot doc:FIRESTORE.document(affectedDoc).
+                        getParent().getParent().getParent().getParent().getParent().get().get()
+                        .getDocuments()) {
+                    if (doc.getId().equals("testOrders")) {
+                        if (doc.get("orderCount") !=null) {
+                            count = (long) doc.get("orderCount");
+                        }
+                        if (doc.get("ordersTotal") !=null) {
+                            ordersTotal = (double) doc.get("ordersTotal");
+                        }
                     }
                 }
+                Map<String,Object> stats = new HashMap<String,Object>();
+                stats.put("orderCount",count + 1);
+                stats.put("ordersTotal",ordersTotal + Double.valueOf((String)cart.get("grandTotal")));
+                FIRESTORE.document(affectedDoc).getParent().getParent().getParent().getParent().set(stats);
+                FIRESTORE.document(affectedDoc).getParent().getParent().update("status", "paid");
+            } catch (InterruptedException e) {
+                logger.log(Level.SEVERE, e.getMessage());
+            } catch (ExecutionException e) {
+                logger.log(Level.SEVERE, e.getMessage());
             }
-            Map<String,Object> stats = new HashMap<String,Object>();
-            stats.put("orderCount",count + 1);
-            stats.put("ordersTotal",ordersTotal + Double.valueOf((String)cart.get("grandTotal")));
-            FIRESTORE.document(affectedDoc).getParent().getParent().getParent().getParent().set(stats);
-            FIRESTORE.document(affectedDoc).getParent().getParent().update("status", "paid");
-        } catch (InterruptedException e) {
-            logger.log(Level.SEVERE, e.getMessage());
-        } catch (ExecutionException e) {
-            logger.log(Level.SEVERE, e.getMessage());
-        }
 
     }
 
@@ -156,7 +155,7 @@ public class OnStripeCharge implements RawBackgroundFunction {
         mail.setFrom(from);
         Personalization dynamicData = new Personalization();
         dynamicData.addTo(to);
-        dynamicData.addTo(admin);
+        //dynamicData.addTo(admin);
         dynamicData.addDynamicTemplateData("cartId", order.getId());
         dynamicData.addDynamicTemplateData("personalInfo", personalInfo);
         dynamicData.addDynamicTemplateData("address", address);

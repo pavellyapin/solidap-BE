@@ -3,6 +3,7 @@ package com.solidap.admin;
 import com.google.cloud.firestore.DocumentReference;
 import com.google.cloud.firestore.Firestore;
 import com.google.cloud.firestore.FirestoreOptions;
+import com.google.cloud.firestore.QueryDocumentSnapshot;
 import com.google.cloud.functions.HttpFunction;
 import com.google.cloud.functions.HttpRequest;
 import com.google.cloud.functions.HttpResponse;
@@ -138,7 +139,6 @@ public class OnPayPalCharge implements HttpFunction {
                     .collection("orders").document(createdPayment.getTransactions().get(0).getDescription());
 
             try {
-                order.update("status" , "paid");
                 Map<String, Object> rootObject = new HashMap<>();
                 Map<String, Object> paymentObject = new HashMap<>();
                 Map<String, Object> tokenObject = new HashMap<>();
@@ -157,13 +157,17 @@ public class OnPayPalCharge implements HttpFunction {
                 Map <String ,Object > address = (Map<String, Object>) orderDetails.get("address");
                 Map <String ,Object > cart = (Map<String, Object>) orderDetails.get("cart");
 
+                setPaidStatus(order , cart);
+
                 SendGrid sg = new SendGrid(prop.getProperty("sendGridKey"));
                 Email from = new Email(prop.getProperty("sendGridFrom"));
                 Email to = new Email(personalInfo.get("email").toString());
+                Email admin = new Email(prop.getProperty("email"));
                 Mail mail = new Mail();
                 mail.setFrom(from);
                 Personalization dynamicData = new Personalization();
                 dynamicData.addTo(to);
+                dynamicData.addTo(admin);
                 dynamicData.addDynamicTemplateData("cartId" , createdPayment.getTransactions().get(0).getDescription());
                 dynamicData.addDynamicTemplateData("personalInfo" , personalInfo);
                 dynamicData.addDynamicTemplateData("address" , address);
@@ -200,6 +204,35 @@ public class OnPayPalCharge implements HttpFunction {
         HttpURLConnection.setFollowRedirects(true);
         response.appendHeader("Location", redirect);
         response.setStatusCode(302);
+    }
+
+    public void setPaidStatus(DocumentReference affectedDoc,Map<String, Object> cart) {
+        try{
+            long count = 0;
+            double ordersTotal = 0;
+            for (QueryDocumentSnapshot doc:affectedDoc.
+                    getParent().getParent().getParent().get().get()
+                    .getDocuments()) {
+                if (doc.getId().equals("orders")) {
+                    if (doc.get("orderCount") !=null) {
+                        count = (long) doc.get("orderCount");
+                    }
+                    if (doc.get("ordersTotal") !=null) {
+                        ordersTotal = (double) doc.get("ordersTotal");
+                    }
+                }
+            }
+            Map<String,Object> stats = new HashMap<String,Object>();
+            stats.put("orderCount",count + 1);
+            stats.put("ordersTotal",ordersTotal + Double.valueOf((String)cart.get("grandTotal")));
+            affectedDoc.getParent().getParent().set(stats);
+            affectedDoc.update("status", "paid");
+        } catch (InterruptedException e) {
+            logger.log(Level.SEVERE, e.getMessage());
+        } catch (ExecutionException e) {
+            logger.log(Level.SEVERE, e.getMessage());
+        }
+
     }
 
     public void setCORS(HttpRequest request,HttpResponse response) {
