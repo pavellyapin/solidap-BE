@@ -50,7 +50,9 @@ public class OnPayPalCharge implements HttpFunction {
 
         }
 
-        if (request.getPath().equals(prop.getProperty("clientPath") + "/paypal/pay")) {
+        logger.info("request.getPath(): " + request.getPath());
+
+        if (request.getPath().equals("/pay")) {
             pay(request,response,prop);
             return;
         }
@@ -123,6 +125,7 @@ public class OnPayPalCharge implements HttpFunction {
 
         Payment payment = new Payment();
         String redirectURL = prop.getProperty("clientRootPath");
+        Boolean sendGridEnable = Boolean.valueOf(prop.getProperty("sendGridEnable"));
         payment.setId(request.getQueryParameters().get("paymentId").get(0));
         try {
             APIContext apiContext = new APIContext(prop.getProperty("payPalClientId") , prop.getProperty("payPalClientSecret"),prop.getProperty("mode") );
@@ -132,10 +135,20 @@ public class OnPayPalCharge implements HttpFunction {
 
             //Custom is the project root URL
             redirectURL = createdPayment.getTransactions().get(0).getCustom() + "/cart";
+            String ordersCollection;
+            String statsCollection;
+
+            if (prop.getProperty("localhost").equals(createdPayment.getTransactions().get(0).getCustom())) {
+                ordersCollection = "testOrders";
+                statsCollection = "testStats";
+            } else {
+                ordersCollection = "orders";
+                statsCollection = "stats";
+            }
 
             DocumentReference order = FIRESTORE.collection("customers")
                     .document("customers")
-                    .collection(createdPayment.getTransactions().get(0).getNoteToPayee()).document("orders")
+                    .collection(createdPayment.getTransactions().get(0).getNoteToPayee()).document(ordersCollection)
                     .collection("orders").document(createdPayment.getTransactions().get(0).getDescription());
 
             try {
@@ -157,35 +170,38 @@ public class OnPayPalCharge implements HttpFunction {
                 Map <String ,Object > address = (Map<String, Object>) orderDetails.get("address");
                 Map <String ,Object > cart = (Map<String, Object>) orderDetails.get("cart");
 
-                setPaidStatus(order , cart);
+                setPaidStatus(statsCollection,prop,order , cart);
 
-                SendGrid sg = new SendGrid(prop.getProperty("sendGridKey"));
-                Email from = new Email(prop.getProperty("sendGridFrom"));
-                Email to = new Email(personalInfo.get("email").toString());
-                Email admin = new Email(prop.getProperty("email"));
-                Mail mail = new Mail();
-                mail.setFrom(from);
-                Personalization dynamicData = new Personalization();
-                dynamicData.addTo(to);
-                dynamicData.addTo(admin);
-                dynamicData.addDynamicTemplateData("cartId" , createdPayment.getTransactions().get(0).getDescription());
-                dynamicData.addDynamicTemplateData("personalInfo" , personalInfo);
-                dynamicData.addDynamicTemplateData("address" , address);
-                dynamicData.addDynamicTemplateData("cart" , cart);
-                mail.addPersonalization(dynamicData);
-                mail.setTemplateId(prop.getProperty("sendGridConfirmationTemplateId"));
-                Request emailRequest = new Request();
-                try {
-                    emailRequest.setMethod(Method.POST);
-                    emailRequest.setEndpoint("mail/send");
-                    emailRequest.setBody(mail.build());
-                    Response emailResponse = sg.api(emailRequest);
-                    logger.info("emailResponse.getStatusCode() --------> " + emailResponse.getStatusCode());
-                    logger.info("emailResponse.getBody() --------> " + emailResponse.getBody());
-                    logger.info("emailResponse.getHeaders() --------> " + emailResponse.getHeaders());
-                } catch (IOException ex) {
-                    logger.info("EMAIL ERROR --------> " + ex.getMessage());
+                if (sendGridEnable) {
+                    SendGrid sg = new SendGrid(prop.getProperty("sendGridKey"));
+                    Email from = new Email(prop.getProperty("sendGridFrom"));
+                    Email to = new Email(personalInfo.get("email").toString());
+                    Email admin = new Email(prop.getProperty("email"));
+                    Mail mail = new Mail();
+                    mail.setFrom(from);
+                    Personalization dynamicData = new Personalization();
+                    dynamicData.addTo(to);
+                    dynamicData.addTo(admin);
+                    dynamicData.addDynamicTemplateData("cartId" , createdPayment.getTransactions().get(0).getDescription());
+                    dynamicData.addDynamicTemplateData("personalInfo" , personalInfo);
+                    dynamicData.addDynamicTemplateData("address" , address);
+                    dynamicData.addDynamicTemplateData("cart" , cart);
+                    mail.addPersonalization(dynamicData);
+                    mail.setTemplateId(prop.getProperty("sendGridConfirmationTemplateId"));
+                    Request emailRequest = new Request();
+                    try {
+                        emailRequest.setMethod(Method.POST);
+                        emailRequest.setEndpoint("mail/send");
+                        emailRequest.setBody(mail.build());
+                        Response emailResponse = sg.api(emailRequest);
+                        logger.info("emailResponse.getStatusCode() --------> " + emailResponse.getStatusCode());
+                        logger.info("emailResponse.getBody() --------> " + emailResponse.getBody());
+                        logger.info("emailResponse.getHeaders() --------> " + emailResponse.getHeaders());
+                    } catch (IOException ex) {
+                        logger.info("EMAIL ERROR --------> " + ex.getMessage());
+                    }
                 }
+
             } catch (InterruptedException e) {
                 logger.log(Level.SEVERE,e.getMessage());
             } catch (ExecutionException e) {
@@ -206,10 +222,12 @@ public class OnPayPalCharge implements HttpFunction {
         response.setStatusCode(302);
     }
 
-    public void setPaidStatus(DocumentReference affectedDoc,Map<String, Object> cart) {
+    public void setPaidStatus(String statsCollection,Properties prop,DocumentReference affectedDoc,Map<String, Object> cart) {
         try{
             long count = 0;
             double ordersTotal = 0;
+            DocumentReference order = affectedDoc.getParent().getParent();
+            String uid = order.getParent().getParent().getParent().getId();
             for (QueryDocumentSnapshot doc:affectedDoc.
                     getParent().getParent().getParent().get().get()
                     .getDocuments()) {
@@ -223,10 +241,33 @@ public class OnPayPalCharge implements HttpFunction {
                 }
             }
             Map<String,Object> stats = new HashMap<String,Object>();
+            Map<String,Object> paid = new HashMap<String,Object>();
+            Calendar currentDate = Calendar.getInstance(TimeZone.getTimeZone(prop.getProperty("timezone")));
+            String day = String.valueOf(currentDate.get(Calendar.DAY_OF_MONTH));
+            String month = String.valueOf(currentDate.get(Calendar.MONTH));
+            String year = String.valueOf(currentDate.get(Calendar.YEAR));
+            Map<String,Object> statsSumamry = new HashMap<String,Object>();
+            Map<String,Object> cartSumamry = new HashMap<String,Object>();
+            Map<String,Object> yearSumamry = new HashMap<String,Object>();
+            Map<String,Object> monthSumamry = new HashMap<String,Object>();
+            Map<String,Object> daySumamry = new HashMap<String,Object>();
+            cartSumamry.put("cart" , cart);
+            cartSumamry.put("uid",uid);
+            statsSumamry.put(order.getId(),cartSumamry);
+            daySumamry.put(day,statsSumamry);
+            monthSumamry.put(month,daySumamry);
+            yearSumamry.put(year,monthSumamry);
+            paid.put("status","paid");
+            paid.put("method","paypal");
+
             stats.put("orderCount",count + 1);
             stats.put("ordersTotal",ordersTotal + Double.valueOf((String)cart.get("grandTotal")));
+            FIRESTORE.collection(statsCollection)
+                    .document(year).
+                    collection(month).
+                    document(day).collection(order.getId()).add(cartSumamry);
             affectedDoc.getParent().getParent().set(stats);
-            affectedDoc.update("status", "paid");
+            affectedDoc.update(paid);
         } catch (InterruptedException e) {
             logger.log(Level.SEVERE, e.getMessage());
         } catch (ExecutionException e) {

@@ -27,9 +27,7 @@ import com.stripe.param.PaymentIntentCreateParams;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Properties;
+import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -68,8 +66,10 @@ public class OnStripeCharge implements RawBackgroundFunction {
             if (token.getAsJsonObject().get("paymentIntent") != null) {
                 PaymentIntent paymentIntent = PaymentIntent.retrieve(token.getAsJsonObject().get("paymentIntent").getAsString());
                 paymentIntent.confirm();
-                setPaidStatus(affectedDoc,cart);
-                sendEmail(prop, order, personalInfo, cart, address);
+                setPaidStatus(prop,affectedDoc,cart,token);
+                if (Boolean.parseBoolean(prop.getProperty("sendGridEnable"))) {
+                    sendEmail(prop, order, personalInfo, cart, address);
+                }
             } else {
                 Map<String, Object> customerParams = new HashMap<>();
                 customerParams.put(
@@ -97,8 +97,10 @@ public class OnStripeCharge implements RawBackgroundFunction {
                         && paymentIntent.getNextAction().getType().equals("use_stripe_sdk")) {
                     FIRESTORE.document(affectedDoc).getParent().getParent().update("status", paymentIntent.getClientSecret());
                 } else if (paymentIntent.getStatus().equals("succeeded")) {
-                    setPaidStatus(affectedDoc,cart);
-                    sendEmail(prop, order, personalInfo, cart, address);
+                    setPaidStatus(prop,affectedDoc,cart,token);
+                    if (Boolean.parseBoolean(prop.getProperty("sendGridEnable"))) {
+                        sendEmail(prop, order, personalInfo, cart, address);
+                    }
                 } else {
                     FIRESTORE.document(affectedDoc).getParent().getParent().update("status", "failed");
                 }
@@ -114,10 +116,12 @@ public class OnStripeCharge implements RawBackgroundFunction {
         }
     }
 
-    public void setPaidStatus(String affectedDoc,Map<String, Object> cart) {
+    public void setPaidStatus(Properties prop,String affectedDoc,Map<String, Object> cart, JsonElement token) {
         try{
             long count = 0;
             double ordersTotal = 0;
+            DocumentReference order = FIRESTORE.document(affectedDoc).getParent().getParent();
+            String uid = order.getParent().getParent().getParent().getId();
             for (QueryDocumentSnapshot doc:FIRESTORE.document(affectedDoc).
                     getParent().getParent().getParent().getParent().getParent().get().get()
                     .getDocuments()) {
@@ -130,11 +134,38 @@ public class OnStripeCharge implements RawBackgroundFunction {
                     }
                 }
             }
+
+
             Map<String,Object> stats = new HashMap<String,Object>();
+            Map<String,Object> paid = new HashMap<String,Object>();
+            Calendar currentDate = Calendar.getInstance(TimeZone.getTimeZone(prop.getProperty("timezone")));
+            String day = String.valueOf(currentDate.get(Calendar.DAY_OF_MONTH));
+            String month = String.valueOf(currentDate.get(Calendar.MONTH));
+            String year = String.valueOf(currentDate.get(Calendar.YEAR));
+            Map<String,Object> statsSumamry = new HashMap<String,Object>();
+            Map<String,Object> cartSumamry = new HashMap<String,Object>();
+            Map<String,Object> yearSumamry = new HashMap<String,Object>();
+            Map<String,Object> monthSumamry = new HashMap<String,Object>();
+            Map<String,Object> daySumamry = new HashMap<String,Object>();
+            cartSumamry.put("cart" , cart);
+            cartSumamry.put("uid",uid);
+            statsSumamry.put(order.getId(),cartSumamry);
+            daySumamry.put(day,statsSumamry);
+            monthSumamry.put(month,daySumamry);
+            yearSumamry.put(year,monthSumamry);
+            paid.put("status","paid");
+            paid.put("method","card");
             stats.put("orderCount",count + 1);
             stats.put("ordersTotal",ordersTotal + Double.valueOf((String)cart.get("grandTotal")));
+            FIRESTORE.collection("stats")
+                    .document(year).
+                    collection(month).
+                    document(day).collection(order.getId()).add(cartSumamry);
             FIRESTORE.document(affectedDoc).getParent().getParent().getParent().getParent().set(stats);
-            FIRESTORE.document(affectedDoc).getParent().getParent().update("status", "paid");
+            if (token.getAsJsonObject().get("type").getAsString().equals("card")) {
+                paid.put("last4",token.getAsJsonObject().get("card").getAsJsonObject().get("last4").getAsString());
+            }
+            FIRESTORE.document(affectedDoc).getParent().getParent().update(paid);
         } catch (InterruptedException e) {
             logger.log(Level.SEVERE, e.getMessage());
         } catch (ExecutionException e) {
